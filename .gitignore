@@ -1,0 +1,76 @@
+# ---- Android / 构建产物 ----
+*.apk
+*.aab
+*.ap_
+*.dex
+build/
+.gradle/
+local.properties
+.cxx/
+.externalNativeBuild/
+captures/
+*.iml
+.idea/
+*.hprof
+
+# ---- 百度语音 SDK 与授权文件（绝不入库）----
+*.bsg
+baidu_speech_grammar.bsg
+WakeUp.bin
+*.license
+*.lic
+baidu_tts_license
+sn.txt
+baidu_auth_*.json
+
+# ---- 模型文件（体积大，按需下载）----
+models/*
+!models/README.md
+*.onnx
+*.ort
+*.tflite
+*.litertlm
+*.bin
+*.pt
+*.pth
+*.npy
+*.param
+
+# ---- 音频素材与原始录音（体积大）----
+assets/*
+!assets/README.md
+*.wav
+*.pcm
+*.raw
+*.mp3
+*.aac
+*.opus
+*.m4a
+bench/noise/raw/
+
+# ---- 评测结果：只入库结构化数据，原始音频不入库 ----
+bench/results/*.csv
+bench/results/*.tsv
+bench/results/*.json
+bench/results/*.md
+!bench/results/.gitkeep
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+
+# ---- 系统 ----
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# ---- 编辑器临时 ----
+.vscode/
+.idea/workspace.xml
