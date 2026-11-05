@@ -23,6 +23,9 @@ baidu_tts_license
 sn.txt
 baidu_auth_*.json
 
+# ---- 公司内部接口文档（仅本地参考，不入库）----
+docs/reference/
+
 # ---- 模型文件（体积大，按需下载）----
 models/*
 !models/README.md
