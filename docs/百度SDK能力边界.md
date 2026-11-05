@@ -1,7 +1,7 @@
 # 百度语音 SDK 能力边界清单
 
-> **状态：表 A 已按项目真实接口文档重建**（2026-11-05）｜ 其余待填
-> 这是全仓库**唯一一份别人拿不到的情报**——它同时是面试答卷、三栈对比的 A 栈基线、
+> **状态：表 A 已按项目真实接口文档重建**（2026-11-05）｜ 其余待填  
+> 这是全仓库**唯一一份别人拿不到的情报**——它同时是面试答卷、三栈对比的 A 栈基线、  
 > 以及你在公司内部推动技术迁移的技术依据。
 >
 > **填写原则：以你项目里的实际行为为准，接口文档只作参考。两者不一致的地方单开一列——那才是价值所在。**
@@ -10,16 +10,17 @@
 
 ## 0 · 这套 SDK 的真实形态（先纠正认知）
 
-> ⚠️ **重要：项目用的不是公开版 `bdasr_aipd` SDK，而是一套车规定制封装。**
-> 唤醒回调中 `statistic.sdk_version = 4.8.7.2`，对外接口是 `SpeechEventManager`，
+> ⚠️ **重要：项目用的不是公开版 `bdasr_aipd` SDK，而是一套车规定制封装。**  
+> 唤醒回调中 `statistic.sdk_version = 4.8.7.2`，对外接口是 `SpeechEventManager`，  
 > 而非公开版的 `SpeechRecognizer`。两者能力边界差异很大——**公开文档查不到你用的这版**。
 
 ### 架构分层
 
 ```
-┌─ 硬件 / DSP 侧 ────────────────────────────────┐
+┌─ 硬件 / NPU 侧 ────────────────────────────────┐
 │  麦克风阵列 → 3A(AEC/ANS/AGC) → 波束 → 多通道 PCM │
-│  SOLUTION_WITH_BAIDU_DSP：前端处理在 DSP 侧完成   │
+│  ★ 已确认：降噪算法跑在 NPU 上                   │
+│  SOLUTION_WITH_BAIDU_DSP：前端处理下沉硬件        │
 └───────────────────┬────────────────────────────┘
                     │ IPcmAudioRecord（由项目自己实现）
 ┌───────────────────▼────────────────────────────┐
@@ -27,6 +28,7 @@
 │  ① 提供多通道 PCM 给 SDK                        │
 │  ② 接收解码结果与语义资源                        │
 │  ③ 参考信号回灌 AEC（播报打断的关键）             │
+│  ★ native 负载极轻：主要是解码器 tiny_easr       │
 └───────────────────┬────────────────────────────┘
                     │
 ┌───────────────────▼────────────────────────────┐
@@ -38,28 +40,30 @@
 
 ### 由此得出的四个判断
 
-1. **ABI 疑问有答案方向了。** 公开版只声明 `armeabi-v7a` / `v8a` 是因为它把 3A 和波束放在 Android 侧做；这套定制版走 **DSP 方案**，前端处理下沉到硬件，Android 侧只跑解码器（`tiny_easr`）。所以 ABI 限制与你们的 arm64 平台不冲突——但**具体是哪条路径，仍需你核实**（见 Q1）。
-
+1. **NPU 部署才是你的主战场，不是 ABI。**
+   降噪在 NPU 上 → Android 侧 native 只有解码器 → **ABI 兼容性问题基本不存在**（32 位也跑得动）。
+   真正值得深挖的是：**哪个 NPU？模型怎么转换部署？量化方案？算子有没有回退？功耗与温升怎么控？**
+   —— 这恰好就是 24 周路线图阶段 3 的「端侧部署」，**而你每天都在做**。
+   学习重点应从"怎么部署"转向"**怎么横向对比、怎么量化评测、怎么在不同 SoC 之间做选型**"，
+   这才是从执行者变成决策者的那一步。
 2. **`IPcmAudioRecord` 是你项目自己的实现，这是整条链路上工程量最大、也最能体现个人能力的地方。** 音频格式、通道数、参考信号回灌时机都在你手里。"哪一段是你自己设计的"——答案就在这里。
-
 3. **这份文档只覆盖 ASR + 唤醒 + 热词，没有 TTS。** 说明合成走的是另一套 SDK（表 B 单独记）。**两套 SDK 的版本节奏、失败模式、鉴权方式都不一样，是两个独立的故障域**——这是常被忽略的架构事实。
-
 4. **能力比公开版强得多**：多实例、车内/车外双模式、免唤醒、oneshot、声纹唤醒、场景化指令词、离在线并行识别、定向识别。这些在公开文档里查不到，只能靠你手上的接口文档讲出来。
 
 ---
 
 ## 表 A1 · 初始化与模式切换
 
-| # | 能力项 | 接口 / 关键参数 | 文档规定的边界与约束 | 你项目实际用法 | 风险与坑 |
-|---|---|---|---|---|---|
-| A1-1 | SDK 初始化 | `initSDK(Context, SDKConfig)`<br>Builder: `solution` `algorithm` `audioRecord` `audioZoneNum` `logLevel` `hotPatch` `otaInfo` `evetnListener` | `audioRecord` 必传（`IPcmAudioRecord` 自定义实现）；初始化前须完成 AudioRecord 与 PCM 格式对齐 | | |
-| A1-2 | 硬件方案 | `SPEECH_SOLUTION`<br>`SOLUTION_WITH_BAIDU_DSP`<br>`SOLUTION_BAIDU_SOFT_AEC`<br>`SOLUTION_THIRD_PARTY_AEC` | 三选一。DSP 方案前端在硬件侧；软消噪与三方消噪在 Android 侧。**方案切换需重新 initSDK** | | |
-| A1-3 | 算法类型 | `SPEECH_ALGORITHM`<br>`ALGORITHM_LINE_AEC`（线性 AEC）<br>`ALGORITHM_MODEL_BEAM`（模型波束）<br>`ALGORITHM_BEAM_FEATURE`（模型特征） | 与 `solution` 正交组合。车内用线性 AEC，车外用模型波束——**说明两套场景的前端策略不同** | | |
-| A1-4 | 音区数量 | `audioZoneNum` | 车内 4 音区 / 车外 3 音区。**音区数影响波束与定向能力** | | |
-| A1-5 | 单/多实例 | `setPlayMode(Context, playMode)`<br>`playMode`: 0 单实例 / 1 多实例 | **切换模式前必须先停掉前面所有识别**；**车外模式仅支持单实例识别** | | |
-| A1-6 | 车内/车外切换 | `resetSDK(Context, SDKConfig)` | 调用时机严格：**必须已退出识别 & 退出唤醒**（等待 `wp.exit` 与 `asr.exit` 回调）。时序错误会状态残留 | | |
-| A1-7 | 车外模式开关 | `AudioManager.setParameters("car_mode=" + mode)` | 通过系统 AudioManager 参数告知 HAL，非 SDK 接口 | | |
-| A1-8 | 原生库热加载 | `hotPatch("/data/easr/")` | 路径无 so 或无权限时**自动回退到自带库**；当前支持热加载：**离线解码器**。日志 `will load tiny_easr so from xxx, md5 is xxx` | | |
+| #    | 能力项     | 接口 / 关键参数                                                                                                                                       | 文档规定的边界与约束                                                                                  | 你项目实际用法                             | 风险与坑 |
+| ---- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- | ----------------------------------- | ---- |
+| A1-1 | SDK 初始化 | `initSDK(Context, SDKConfig)`<br />Builder: `solution` `algorithm` `audioRecord` `audioZoneNum` `logLevel` `hotPatch` `otaInfo` `evetnListener` | `audioRecord` 必传（`IPcmAudioRecord` 自定义实现）；初始化前须完成 AudioRecord 与 PCM 格式对齐                    | AudioRecord要注意缓存音频数据，以及和技术部音频数据传输链路 |      |
+| A1-2 | 硬件方案    | `SPEECH_SOLUTION`<br />`SOLUTION_WITH_BAIDU_DSP`<br />`SOLUTION_BAIDU_SOFT_AEC`<br />`SOLUTION_THIRD_PARTY_AEC`                                 | 三选一。DSP 方案前端在硬件侧；软消噪与三方消噪在 Android 侧。**方案切换需重新 initSDK**                                    |                                     |      |
+| A1-3 | 算法类型    | `SPEECH_ALGORITHM`<br />`ALGORITHM_LINE_AEC`（线性 AEC）<br />`ALGORITHM_MODEL_BEAM`（模型波束）<br />`ALGORITHM_BEAM_FEATURE`（模型特征）                      | 与 `solution` 正交组合。车内用线性 AEC，车外用模型波束——**说明两套场景的前端策略不同**                                      |                                     |      |
+| A1-4 | 音区数量    | `audioZoneNum`                                                                                                                                  | 车内 4 音区 / 车外 3 音区。**音区数影响波束与定向能力**                                                          |                                     |      |
+| A1-5 | 单/多实例   | `setPlayMode(Context, playMode)`<br />`playMode`: 0 单实例 / 1 多实例                                                                                 | **切换模式前必须先停掉前面所有识别**；**车外模式仅支持单实例识别**                                                       |                                     |      |
+| A1-6 | 车内/车外切换 | `resetSDK(Context, SDKConfig)`                                                                                                                  | 调用时机严格：**必须已退出识别 & 退出唤醒**（等待 `wp.exit` 与 `asr.exit` 回调）。时序错误会状态残留                           |                                     |      |
+| A1-7 | 车外模式开关  | `AudioManager.setParameters("car_mode=" + mode)`                                                                                                | 通过系统 AudioManager 参数告知 HAL，非 SDK 接口                                                         |                                     |      |
+| A1-8 | 原生库热加载  | `hotPatch("/data/easr/")`                                                                                                                       | 路径无 so 或无权限时**自动回退到自带库**；当前支持热加载：**离线解码器**。日志 `will load tiny_easr so from xxx, md5 is xxx` |                                     |      |
 
 > **A1-6 是最容易出线上问题的地方。** 内外模式切换涉及"退唤醒 → 退识别 → resetSDK → 重新 init → 重新开唤醒"的完整序列，任何一步顺序错或没等回调到位，都会出现唤醒/识别回调不来。这条值得单独写进面试话术。
 
@@ -67,18 +71,18 @@
 
 ## 表 A2 · 唤醒
 
-| # | 能力项 | 接口 / 关键参数 | 文档规定的边界与约束 | 你项目实际用法 | 风险与坑 |
-|---|---|---|---|---|---|
-| A2-1 | 打开唤醒 | `startWakeUp(Context, params, listener)`<br>`WP_WORDS` `WP_AKS_ENABLE` `WP_KWD_SPK_DAT_FILEPATH` `IS_ENABLE_ONESHOT` `ENBALE_VPR_GEN` | **只有唤醒打开才会有唤醒回调**。`WP_WORDS` 同时承载唤醒词与场景化指令词 | | |
-| A2-2 | 关闭唤醒 | `exitWakeup()` | 关闭后不再有唤醒回调 | | |
-| A2-3 | 唤醒词 | `WP_WORDS` JSONArray | 例：`"小度小度"`、`"嗨领克"` | | |
-| A2-4 | 场景化指令词 | 同 `WP_WORDS` | 例：`"我要拍照"`、`"开始导航"`——**免唤醒直接触发功能的指令**，与唤醒词共用一个数组 | | |
-| A2-5 | 自定义唤醒词 | `WP_AKS_ENABLE`=true<br>`setKwdConfig`：`WP_WORD_DEFINE` `WP_AKS_ENABLE_KEYWORD` `WP_AKS_DISABLE_KEYWORD` | 支持**动态**增删自定义唤醒词，无需重启 | | |
-| A2-6 | 免唤醒 | 唤醒回调取 `wakeup_time` → `startAsr` 传 `WAKEUP_TIME` + `WP_IS_ONESHOT`=0 | 依赖唤醒时间戳与识别起点对齐，是免唤醒链路的实现基础 | | |
-| A2-7 | oneshot | `IS_ENABLE_ONESHOT`=true<br>回调 `CALLBACK_EVENT_WAKEUP_ONESHOT`，`WP_IS_ONESHOT` | 唤醒后 query 距唤醒 **约 400ms** 视为 oneshot | | |
-| A2-8 | 声纹（VPR） | `ENBALE_VPR_GEN`（男/女/儿童判定）<br>注册 `setKwdConfig`：`WP_KWD_ENABLE_VOICEPRINT_WORD`（词+阈值）`WP_KWD_ENROLL_VOICEPRINT_INFO` | 注册 3 次（index 0/1/2，index=0 清空、index=2 完成）；支持**模型回写文件**，下次启动免音频恢复；判定 `passVoice`：1000 命中 / 1001 不命中 / 1002 判定失败 | | |
-| A2-9 | 动态删声纹 | `WP_KWD_DELETE_PERSON` | 按注册人名删除 | | |
-| A2-10 | 二次唤醒 | 回调 `wakeuo_repeat`=1 | **二次唤醒不需要重启识别**——连续对话体验的关键 | | |
+| #     | 能力项     | 接口 / 关键参数                                                                                                                               | 文档规定的边界与约束                                                                                                     | 你项目实际用法  | 风险与坑 |
+| ----- | ------- | --------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | -------- | ---- |
+| A2-1  | 打开唤醒    | `startWakeUp(Context, params, listener)`<br />`WP_WORDS` `WP_AKS_ENABLE` `WP_KWD_SPK_DAT_FILEPATH` `IS_ENABLE_ONESHOT` `ENBALE_VPR_GEN` | **只有唤醒打开才会有唤醒回调**。`WP_WORDS` 同时承载唤醒词与场景化指令词                                                                    |          |      |
+| A2-2  | 关闭唤醒    | `exitWakeup()`                                                                                                                          | 关闭后不再有唤醒回调                                                                                                     |          |      |
+| A2-3  | 唤醒词     | `WP_WORDS` JSONArray                                                                                                                    | 例：`"小度小度"`、`"嗨领克"`                                                                                             |          |      |
+| A2-4  | 场景化指令词  | 同 `WP_WORDS`                                                                                                                            | 例：`"我要拍照"`、`"开始导航"`——**免唤醒直接触发功能的指令**，与唤醒词共用一个数组                                                               |          |      |
+| A2-5  | 自定义唤醒词  | `WP_AKS_ENABLE`=true<br />`setKwdConfig`：`WP_WORD_DEFINE` `WP_AKS_ENABLE_KEYWORD` `WP_AKS_DISABLE_KEYWORD`                              | 支持**动态**增删自定义唤醒词，无需重启                                                                                          |          |      |
+| A2-6  | 免唤醒     | 唤醒回调取 `wakeup_time` → `startAsr` 传 `WAKEUP_TIME` + `WP_IS_ONESHOT`=0                                                                    | 依赖唤醒时间戳与识别起点对齐，是免唤醒链路的实现基础                                                                                     |          |      |
+| A2-7  | oneshot | `IS_ENABLE_ONESHOT`=true<br />回调 `CALLBACK_EVENT_WAKEUP_ONESHOT`，`WP_IS_ONESHOT`                                                        | 唤醒后 query 距唤醒 **约 400ms** 视为 oneshot                                                                           | 已删除      |      |
+| A2-8  | 声纹（VPR） | `ENBALE_VPR_GEN`（男/女/儿童判定）<br />注册 `setKwdConfig`：`WP_KWD_ENABLE_VOICEPRINT_WORD`（词+阈值）`WP_KWD_ENROLL_VOICEPRINT_INFO`                  | 注册 3 次（index 0/1/2，index=0 清空、index=2 完成）；支持**模型回写文件**，下次启动免音频恢复；判定 `passVoice`：1000 命中 / 1001 不命中 / 1002 判定失败 | 声纹准确率有点低 |      |
+| A2-9  | 动态删声纹   | `WP_KWD_DELETE_PERSON`                                                                                                                  | 按注册人名删除                                                                                                        |          |      |
+| A2-10 | 二次唤醒    | 回调 `wakeuo_repeat`=1                                                                                                                    | **二次唤醒不需要重启识别**——连续对话体验的关键                                                                                     |          |      |
 
 > **声纹阈值的坑**：`WP_KWD_ENABLE_VOICEPRINT_WORD` 的阈值**文档明确说"可不设置，根据实车环境调试"**（示例值 0.3）。这意味着阈值不是产品给定的常数，而是**必须实车标定的参数**——标定过程本身就是很好的面试内容。
 
@@ -86,20 +90,20 @@
 
 ## 表 A3 · 识别
 
-| # | 能力项 | 接口 / 关键参数 | 文档规定的边界与约束 | 你项目实际用法 | 风险与坑 |
-|---|---|---|---|---|---|
-| A3-1 | 开始识别 | `startAsr(Context, params, listener)` | 参数体系见下。**`SDK_PLAY_MODE` 必传** | | |
-| A3-2 | 唤醒后识别 | `WAKEUP_TIME`（唤醒时间）+ `WP_PARAM_STATUS`=1 + `WP_PARAM_WORDS`（当前唤醒词） | | | |
-| A3-3 | 纯识别 | `WAKEUP_TIME`=-1 + `WP_PARAM_STATUS`=-1 | | | |
-| A3-4 | 单次 / 多次识别 | `ASR_ENABLE_MUTIPLY_SPEECH`：0 单次 / 1 多次 | 多次识别用于连续对话；`ASR_FINISH` 每次识别结束都会回调 | | |
-| A3-5 | 离/在线/并行 | `DECODER`：0 离线 / 1 在线 / 4 并行 | **并行模式下离线与在线各产生一个 `ASR_FINISH`** | | |
-| A3-6 | 定向识别 | `ENABLE_VAD_ANGLE_WAKE_MATCH`=1 + `WP_INDEX`（音区编号） | **车外识别仅支持定向**。非定向时 `ENABLE_VAD_ANGLE_WAKE_MATCH`=0 | | |
-| A3-7 | 多实例音区 | `PLAY_MODE_ZONE`（音区编号） | 多实例模式下必传，用于区分是哪个音区在识别 | | |
-| A3-8 | 打断识别 | `exitASR(params)` | **会打断识别，导致无识别结果和三方结果**；带 `PLAY_MODE_ZONE` 只取消该实例，不带则取消所有 | | |
-| A3-9 | 停止识别 | `stopASR(params)` | **只停止音频上传，继续等识别结果**；有无结果取决于停止时机 | | |
-| A3-10 | 在线必传参数 | `PID` + `APP_KEY` + `URL` + `CUID` | PID 由 PM 申请；`URL` 为在线识别服务域名（示例 `https://audiotest.baidu.com/v2`） | | |
-| A3-11 | 离线必传参数 | `OFFLINE_PID` + `OFFLINE_APP_KEY` + `ASR_OFFLINE_ENGINE_LICENSE_FILE_PATH` + `ASR_OFFLINE_ENGINE_DAT_FILE_PATH` | **加载引擎时会校验 License**；License 可放 `assets:///bds_license.dat` 或绝对路径 | | |
-| A3-12 | 用户透传 | `decoder-server.pam` | 自定义字段随请求上行，可用于埋点/场景标识 | | |
+| #     | 能力项       | 接口 / 关键参数                                                                                                       | 文档规定的边界与约束                                                        | 你项目实际用法 | 风险与坑 |
+| ----- | --------- | --------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- | ------- | ---- |
+| A3-1  | 开始识别      | `startAsr(Context, params, listener)`                                                                           | 参数体系见下。**`SDK_PLAY_MODE` 必传**                                     |         |      |
+| A3-2  | 唤醒后识别     | `WAKEUP_TIME`（唤醒时间）+ `WP_PARAM_STATUS`=1 + `WP_PARAM_WORDS`（当前唤醒词）                                              |                                                                   |         |      |
+| A3-3  | 纯识别       | `WAKEUP_TIME`=-1 + `WP_PARAM_STATUS`=-1                                                                         |                                                                   |         |      |
+| A3-4  | 单次 / 多次识别 | `ASR_ENABLE_MUTIPLY_SPEECH`：0 单次 / 1 多次                                                                         | 多次识别用于连续对话；`ASR_FINISH` 每次识别结束都会回调                                |         |      |
+| A3-5  | 离/在线/并行   | `DECODER`：0 离线 / 1 在线 / 4 并行                                                                                    | **并行模式下离线与在线各产生一个 `ASR_FINISH`**                                  |         |      |
+| A3-6  | 定向识别      | `ENABLE_VAD_ANGLE_WAKE_MATCH`=1 + `WP_INDEX`（音区编号）                                                              | **车外识别仅支持定向**。非定向时 `ENABLE_VAD_ANGLE_WAKE_MATCH`=0                |         |      |
+| A3-7  | 多实例音区     | `PLAY_MODE_ZONE`（音区编号）                                                                                          | 多实例模式下必传，用于区分是哪个音区在识别                                             |         |      |
+| A3-8  | 打断识别      | `exitASR(params)`                                                                                               | **会打断识别，导致无识别结果和三方结果**；带 `PLAY_MODE_ZONE` 只取消该实例，不带则取消所有          |         |      |
+| A3-9  | 停止识别      | `stopASR(params)`                                                                                               | **只停止音频上传，继续等识别结果**；有无结果取决于停止时机                                   |         |      |
+| A3-10 | 在线必传参数    | `PID` + `APP_KEY` + `URL` + `CUID`                                                                              | PID 由 PM 申请；`URL` 为在线识别服务域名（示例 `https://audiotest.baidu.com/v2`）  |         |      |
+| A3-11 | 离线必传参数    | `OFFLINE_PID` + `OFFLINE_APP_KEY` + `ASR_OFFLINE_ENGINE_LICENSE_FILE_PATH` + `ASR_OFFLINE_ENGINE_DAT_FILE_PATH` | **加载引擎时会校验 License**；License 可放 `assets:///bds_license.dat` 或绝对路径 |         |      |
+| A3-12 | 用户透传      | `decoder-server.pam`                                                                                            | 自定义字段随请求上行，可用于埋点/场景标识                                             |         |      |
 
 > **A3-8 与 A3-9 的区别是打断策略的核心。** `exitASR` = 立刻丢弃（用于用户真正想打断）；`stopASR` = 闭嘴但保留结果（用于误触发回滚、或者"我想让系统别再听了但已说的话别丢"）。**能讲清这个区别，说明你理解打断的真实语义，而不是只会调接口。**
 
@@ -107,14 +111,14 @@
 
 ## 表 A4 · 热词与通讯录
 
-| # | 能力项 | 接口 / 关键参数 | 文档规定的边界与约束 | 你项目实际用法 | 风险与坑 |
-|---|---|---|---|---|---|
-| A4-1 | 在线热词上传 | `startUpload(Context, params, listener)`<br>`UPLOAD_TYPE`("hotwords"/"contacts") `UPLOAD_HOT_WORDS_TYEP` `UPLOAD_HOT_MODE` `UPLOAD_URL` `UPLOAD_WORDS` `PID` `CUID` | **独立接口、独立链路、独立服务器地址**（热词与通讯录地址各不相同，也不同于识别地址）。上传成功后**下次识别生效** | | |
-| A4-2 | 在线热词启用 | `startAsr` 传 `HOT_WORDS_ARRAY` | JSON 中的 `mode` / `upload_pid` / `type` **必须与上传时一一对应** | | |
-| A4-3 | 离线持久热词 | `loadKWS` 传 `ASR_OFFLINE_ENGINE_CORPUS_UPLOAD_TYPE`（1 通讯录 / 2 热词）+ `_VALUE` | 加载引擎时设置一份，**持续生效** | | |
-| A4-4 | 离线热词动态更新 | `setKwdConfig` 传同组参数 | 更新已 load 的离线引擎热词，持续生效 | | |
-| A4-5 | 临时热词 | `startAsr` 或 `setKwdConfig` 传 `HOTWORDS_UPDATE_TYPE`="HOT_WORDS_TYPE_TEMPORY" `HOTWORDS_UPDATE_WORDS` `HOTWORDS_UPDATE_CATEGORY` | 单次生效。**不区分场景 ID 时用 `\n` 分隔；区分时传 JSON，key=场景 ID** | | |
-| A4-6 | 场景 ID | `HOTWORDS_UPDATE_CATEGORY`：0 不区分 / 1 区分 | **仅离线临时热词支持场景 ID**；在线临时热词设了会被 SDK 忽略。**格式与 category 不匹配 → 该次设置完全无效**（SDK 打印异常） | | |
+| #    | 能力项      | 接口 / 关键参数                                                                                                                                                             | 文档规定的边界与约束                                                                     | 你项目实际用法 | 风险与坑 |
+| ---- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ | ------- | ---- |
+| A4-1 | 在线热词上传   | `startUpload(Context, params, listener)`<br />`UPLOAD_TYPE`("hotwords"/"contacts") `UPLOAD_HOT_WORDS_TYEP` `UPLOAD_HOT_MODE` `UPLOAD_URL` `UPLOAD_WORDS` `PID` `CUID` | **独立接口、独立链路、独立服务器地址**（热词与通讯录地址各不相同，也不同于识别地址）。上传成功后**下次识别生效**                   |         |      |
+| A4-2 | 在线热词启用   | `startAsr` 传 `HOT_WORDS_ARRAY`                                                                                                                                        | JSON 中的 `mode` / `upload_pid` / `type` **必须与上传时一一对应**                          |         |      |
+| A4-3 | 离线持久热词   | `loadKWS` 传 `ASR_OFFLINE_ENGINE_CORPUS_UPLOAD_TYPE`（1 通讯录 / 2 热词）+ `_VALUE`                                                                                           | 加载引擎时设置一份，**持续生效**                                                             |         |      |
+| A4-4 | 离线热词动态更新 | `setKwdConfig` 传同组参数                                                                                                                                                  | 更新已 load 的离线引擎热词，持续生效                                                          |         |      |
+| A4-5 | 临时热词     | `startAsr` 或 `setKwdConfig` 传 `HOTWORDS_UPDATE_TYPE`="HOT_WORDS_TYPE_TEMPORY" `HOTWORDS_UPDATE_WORDS` `HOTWORDS_UPDATE_CATEGORY`                                      | 单次生效。**不区分场景 ID 时用 `\n` 分隔；区分时传 JSON，key=场景 ID**                               |         |      |
+| A4-6 | 场景 ID    | `HOTWORDS_UPDATE_CATEGORY`：0 不区分 / 1 区分                                                                                                                               | **仅离线临时热词支持场景 ID**；在线临时热词设了会被 SDK 忽略。**格式与 category 不匹配 → 该次设置完全无效**（SDK 打印异常） |         |      |
 
 > **A4-6 是个典型的"静默失败"陷阱**：格式不匹配不报错，只是这次设置不生效。**在量产项目里，这类问题极难定位**——热词就是不生效，但你查不出原因。把这条写进你的踩坑表。
 
@@ -122,32 +126,32 @@
 
 ## 表 A5 · 回调事件与打点锚点 ★
 
-> 这张表同时是**能力边界**和 **M1 延迟打点的锚点源**。
+> 这张表同时是**能力边界**和 **M1 延迟打点的锚点源**。  
 > 用 `onEvent(String name, String params, byte[] data, int offset, int length)` 统一分发。
 
 ### 唤醒类
 
-| 回调常量 | 含义 | 关键字段 |
-|---|---|---|
-| `CALLBACK_EVENT_WAKEUP_READY` | 唤醒打开就绪 | — |
-| `CALLBACK_EVENT_WAKEUP_STOPED` | 唤醒关闭 | — |
-| `CALLBACK_EVENT_WAKEUP_SUCCESS` | 唤醒触发 | `error` `word` `wakeup_time` `wakeuo_repeat` `score` `wp.volume` `location` `playZone` `wakeup_index` `start_end_frames` `passVoice` `wake_sn` `statistic.sdk_version` |
-| `CALLBACK_EVENT_WAKEUP_ONESHOT` | 唤醒后 oneshot | `WP_IS_ONESHOT` |
-| `CALLBACK_EVENT_WAKEUP_VOLUME` | 唤醒音量 | — |
-| `CALLBACK_EVENT_WAKEUP_ERROR` | 唤醒出错 | — |
-| `CALLBACK_EVENT_WAKEUP_KWD_CONFIG` | 唤醒词/声纹配置回调 | `errorCode`(0成功/1失败/2一致性校验失败) `kwdName` `errorDesc` |
+| 回调常量                               | 含义          | 关键字段                                                                                                                                                                   |
+| ---------------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CALLBACK_EVENT_WAKEUP_READY`      | 唤醒打开就绪      | —                                                                                                                                                                      |
+| `CALLBACK_EVENT_WAKEUP_STOPED`     | 唤醒关闭        | —                                                                                                                                                                      |
+| `CALLBACK_EVENT_WAKEUP_SUCCESS`    | 唤醒触发        | `error` `word` `wakeup_time` `wakeuo_repeat` `score` `wp.volume` `location` `playZone` `wakeup_index` `start_end_frames` `passVoice` `wake_sn` `statistic.sdk_version` |
+| `CALLBACK_EVENT_WAKEUP_ONESHOT`    | 唤醒后 oneshot | `WP_IS_ONESHOT`                                                                                                                                                        |
+| `CALLBACK_EVENT_WAKEUP_VOLUME`     | 唤醒音量        | —                                                                                                                                                                      |
+| `CALLBACK_EVENT_WAKEUP_ERROR`      | 唤醒出错        | —                                                                                                                                                                      |
+| `CALLBACK_EVENT_WAKEUP_KWD_CONFIG` | 唤醒词/声纹配置回调  | `errorCode`(0成功/1失败/2一致性校验失败) `kwdName` `errorDesc`                                                                                                                    |
 
 ### 识别类
 
-| 回调常量 | 含义 | 关键字段 | **打点用途** |
-|---|---|---|---|
-| `CALLBACK_EVENT_ASR_READY` | 识别打开就绪 | — | |
-| `CALLBACK_EVENT_ASR_BEGIN` | **语音起点** | — | **t_a**：用户开口 |
-| `CALLBACK_EVENT_ASR_PARTIAL` | 识别结果 | `result_type`(`partial_result`/`final_result`/`third_result`) `best_result` `playZone` `engineType`(0在线/1离线) | **t1** 首个 partial ／ **t2** final_result ／ **t3** `third_result` = 语义资源 |
-| `CALLBACK_EVENT_ASR_END` | **语音尾点** | — | **t0**：端点判定成立 |
-| `CALLBACK_EVENT_ASR_FINISH` | 识别完成（**还有语音资源**） | `error` `playZone` | 多次交互每次都有；并行模式下离线/在线各一次 |
-| `CALLBACK_EVENT_ASR_EXIT` | **识别最终结束** | `playZone` | 全流程只有一次 |
-| `CALLBACK_EVENT_ASR_CANCEL` | 识别取消（exit 时识别未退出） | — | 打断路径埋点 |
+| 回调常量                         | 含义                | 关键字段                                                                                                         | **打点用途**                                                               |
+| ---------------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------- |
+| `CALLBACK_EVENT_ASR_READY`   | 识别打开就绪            | —                                                                                                            |                                                                        |
+| `CALLBACK_EVENT_ASR_BEGIN`   | **语音起点**          | —                                                                                                            | **t_a**：用户开口                                                           |
+| `CALLBACK_EVENT_ASR_PARTIAL` | 识别结果              | `result_type`(`partial_result`/`final_result`/`third_result`) `best_result` `playZone` `engineType`(0在线/1离线) | **t1** 首个 partial ／ **t2** final_result ／ **t3** `third_result` = 语义资源 |
+| `CALLBACK_EVENT_ASR_END`     | **语音尾点**          | —                                                                                                            | **t0**：端点判定成立                                                          |
+| `CALLBACK_EVENT_ASR_FINISH`  | 识别完成（**还有语音资源**）  | `error` `playZone`                                                                                           | 多次交互每次都有；并行模式下离线/在线各一次                                                 |
+| `CALLBACK_EVENT_ASR_EXIT`    | **识别最终结束**        | `playZone`                                                                                                   | 全流程只有一次                                                                |
+| `CALLBACK_EVENT_ASR_CANCEL`  | 识别取消（exit 时识别未退出） | —                                                                                                            | 打断路径埋点                                                                 |
 
 ### ⚠️ 回调的工程铁律（文档明确强调）
 
@@ -161,12 +165,12 @@
 
 ## 表 A6 · 工程调试与可运维性
 
-| # | 能力项 | 接口 / 关键参数 | 边界与约束 | 你项目实际用法 | 风险与坑 |
-|---|---|---|---|---|---|
-| A6-1 | 保存送识别音频 | `DUMP_ASR_AUDIO`=true + `OUT_FILE`（如 `/sdcard/baidu/asr/`） | **仅当次识别有效**；磁盘 IO 会影响识别性能；高版本 Android 可能需私有路径 | | |
-| A6-2 | 端侧日志上传云端 | `startDebugUpload(LOG_UPLOAD, json, listener)` / `stopDebugUpload` | **云端开关需联系 PM 开启**；需传 `LOG_LEVEL` `PID` `CUID` | | |
-| A6-3 | Log 级别控制 | `SpeechEventManager.setLogLevel(level)`，或各接口传 `LOG_LEVEL`，或 initSDK config 设置 | VERBOSE=2 / DEBUG=3 / INFO=4 / WARN=5 / ERROR=6 / ASSERT=7 / OFF=10（**默认 off**）。**三处设置全局生效，后设置覆盖先设置**；部分模块尚未接入 | | |
-| A6-4 | 原生库热加载 | `hotPatch` 路径 + `otaInfo` | 当前仅支持**离线解码器**；加载成功打印 `will load tiny_easr so from xxx, md5 is xxx` | | |
+| #    | 能力项      | 接口 / 关键参数                                                                     | 边界与约束                                                                                                          | 你项目实际用法 | 风险与坑 |
+| ---- | -------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | ------- | ---- |
+| A6-1 | 保存送识别音频  | `DUMP_ASR_AUDIO`=true + `OUT_FILE`（如 `/sdcard/baidu/asr/`）                    | **仅当次识别有效**；磁盘 IO 会影响识别性能；高版本 Android 可能需私有路径                                                                  |         |      |
+| A6-2 | 端侧日志上传云端 | `startDebugUpload(LOG_UPLOAD, json, listener)` / `stopDebugUpload`            | **云端开关需联系 PM 开启**；需传 `LOG_LEVEL` `PID` `CUID`                                                                  |         |      |
+| A6-3 | Log 级别控制 | `SpeechEventManager.setLogLevel(level)`，或各接口传 `LOG_LEVEL`，或 initSDK config 设置 | VERBOSE=2 / DEBUG=3 / INFO=4 / WARN=5 / ERROR=6 / ASSERT=7 / OFF=10（**默认 off**）。**三处设置全局生效，后设置覆盖先设置**；部分模块尚未接入 |         |      |
+| A6-4 | 原生库热加载   | `hotPatch` 路径 + `otaInfo`                                                     | 当前仅支持**离线解码器**；加载成功打印 `will load tiny_easr so from xxx, md5 is xxx`                                            |         |      |
 
 > **A6-2 是 Tier1 交付方的核心资产。** 端侧日志上云 + 云端远程定位，是量产问题闭环的关键能力。**如果你的项目真的用上了它，这就是"量产交付经验"里最难被替代的部分**，也是面试时区分"做过项目"和"负责过量产"的分水岭。
 
@@ -174,23 +178,44 @@
 
 ## 必须回答的三个问题（已更新）
 
-**Q1 · ABI 疑问 —— 现在有方向了，但还需你确认**
-公开版只声明 armeabi-v7a/v8a；你们用的是 DSP 方案定制版（`SOLUTION_WITH_BAIDU_DSP`），
-Android 侧只跑解码器 `tiny_easr`。**请确认：**
-① 你们用的是定制版 SDK 包体还是集成的公开版？② 定制版提供了哪些 ABI？③ arm64 平台是否原生支持？
+**Q1 · ABI 与架构边界 —— 已部分确认**  
+**已确认**：① 是定制版 SDK 包体；② **降噪算法跑在 NPU 上**。  
+**待确认**：③ 定制版提供哪些 ABI、arm64 是否原生支持；④ NPU 归属与模型部署责任方。
 
-> 答：
+> **ABI 术语（填表前先看这段）**：ABI = Application Binary Interface，决定一段**已编译的机器码**能在哪种 CPU 架构上运行。
+> Android 上具体表现为"这个 `.so` 能在什么 CPU 上跑"：同一 SDK 为不同架构各编一份，打包进 APK 时按目录区分
+> `lib/armeabi-v7a/`（ARM 32 位）、`lib/arm64-v8a/`（ARM 64 位）、`lib/x86_64/`（模拟器）。
+> 车机 SoC（高通 8295 / RK3588 等）通常是 arm64-v8a。多数 64 位 CPU 可向下运行 32 位 .so（AArch32 兼容），
+> 但性能打折、包体翻倍，且**纯 64 位进程无法加载 32 位库**。
+>
+> **但对你们这不是问题**：降噪在 NPU 上 → Android 侧 native 只有解码器 → 32 位也跑得动，ABI 影响极小。
+> **所以重点应从"ABI 是什么"转向"架构边界在哪"：**
+> ① Android 侧还跑哪些 native 库？（只有解码器？唤醒模型呢？）
+> ② **VAD 端点判定在 NPU 侧还是 Android 侧？**（决定端点参数在哪配，关联「附一 · 空白清单」第 3 条）
+> ③ 唤醒模型的推理跑在哪
+> ④ **NPU 是哪种？**（高通 HTP / RK3588 NPU / 地平线 BPU / 百度自家 DSP）
+> ⑤ **NPU 模型的转换、量化、部署是你们做的，还是百度提供的？**（这一条决定它算不算你的能力标签）
+>
+> **排查命令**
+> ```bash
+> unzip -l 你的sdk.aar | grep '\.so$'                        # SDK 带了哪些 ABI
+> unzip -l app-release.apk | grep 'lib/'                    # 最终进了哪些
+> adb shell getprop ro.product.cpu.abilist                  # 设备支持哪些
+> adb shell cat /proc/<pid>/maps | grep '\.so'              # 实际加载了哪些（最准）
+> ```
+>
+> 答：是定制版 SDK 包体，降噪跑在 NPU 上。
 
-**Q2 · 网络策略 —— 答案变了**
-公开版是"联网强制走在线"；**这套定制版支持 `DECODER`=4 离在线并行**。
-所以你们项目的真实策略是：什么情况下用并行（0/1/4 如何切换）？离在线结果如何仲裁（取谁、冲突怎么办）？
+**Q2 · 网络策略 —— 答案变了**  
+公开版是"联网强制走在线"；**这套定制版支持 `DECODER`=4 离在线并行**。  
+所以你们项目的真实策略是：什么情况下用并行（0/1/4 如何切换）？离在线结果如何仲裁（取谁、冲突怎么办）？  
 **并行模式下 `ASR_FINISH` 会回调两次**——这直接影响你的状态机设计。
 
 > 答：
 
-**Q3 · 时间戳鉴权**
-本接口文档**未提及**初始化对系统时间的误差要求（那是公开版说法）。
-**请确认：这套定制版是否仍有时间戳校验？License 校验是否与时间相关？**
+**Q3 · 时间戳鉴权**  
+本接口文档**未提及**初始化对系统时间的误差要求（那是公开版说法）。  
+**请确认：这套定制版是否仍有时间戳校验？License 校验是否与时间相关？**  
 若车机无 GPS/NTP，License 过期或时间漂移时会发生什么？
 
 > 答：
@@ -199,21 +224,22 @@ Android 侧只跑解码器 `tiny_easr`。**请确认：**
 
 ## 附一 · 文档未覆盖、需你核实的空白清单
 
-> 接口文档本身也有边界。以下内容**在文档里查不到**，但你的项目里真实存在——
+
+> 接口文档本身也有边界。以下内容**在文档里查不到**，但你的项目里真实存在——  
 > **能补上这些空白，本身就是价值。**
 
-| # | 空白 | 为什么重要 |
-|---|---|---|
-| 1 | **音频格式与采样率由谁定** | `IPcmAudioRecord` 由项目实现，通道数/采样率/位深/帧长都在你手里。这直接决定 DSP 侧能做什么 |
-| 2 | **参考信号回灌机制** | 播报打断能成不成立，全看参考信号从哪取、延迟多少、怎么时间对齐。**文档完全没提，但这是打断的命门** |
-| 3 | **VAD / 端点参数在哪配置** | 文档只给了 `ASR_END` 回调，没给端点超时参数。`VAD_ENDPOINT_TIMEOUT` 这类参数在哪个接口？ |
-| 4 | **`third_result` 的字段结构** | 语义资源结果的 JSON 结构未给。你项目里解析了哪些字段？ |
-| 5 | **`best_result` 之外的置信度** | 是否有置信度/打分字段？做拒识或置信度路由要用 |
-| 6 | **TTS 是哪套 SDK** | 本文档完全没有合成接口。合成是公开版 `tts_1.0.3` 还是另一套定制版？ |
-| 7 | **语义理解 / DM 在哪** | `third_result` 是 SDK 给的语义资源，还是仅关键词？完整的 NLU/DM 链路在哪里实现？ |
-| 8 | **错误码全集** | 文档只给了 `error` 字段，没有错误码表。量产问题定位离不开它 |
-| 9 | **`otaInfo` 的作用** | Builder 里有这个字段但全文未解释 |
-| 10 | **端内外模式的性能差异** | 车内 4 音区线性 AEC vs 车外 3 音区模型波束 —— 两套前端策略的实测差异你有数据吗？ |
+| #  | 空白                       | 为什么重要                                                         |
+| -- | ------------------------ | ------------------------------------------------------------- |
+| 1  | **音频格式与采样率由谁定**          | `IPcmAudioRecord` 由项目实现，通道数/采样率/位深/帧长都在你手里。这直接决定 DSP 侧能做什么    |
+| 2  | **参考信号回灌机制**             | 播报打断能成不成立，全看参考信号从哪取、延迟多少、怎么时间对齐。**文档完全没提，但这是打断的命门**           |
+| 3  | **VAD / 端点参数在哪配置**       | 文档只给了 `ASR_END` 回调，没给端点超时参数。`VAD_ENDPOINT_TIMEOUT` 这类参数在哪个接口？ |
+| 4  | **`third_result` 的字段结构** | 语义资源结果的 JSON 结构未给。你项目里解析了哪些字段？                                |
+| 5  | **`best_result` 之外的置信度** | 是否有置信度/打分字段？做拒识或置信度路由要用                                       |
+| 6  | **TTS 是哪套 SDK**          | 本文档完全没有合成接口。合成是公开版 `tts_1.0.3` 还是另一套定制版？                      |
+| 7  | **语义理解 / DM 在哪**         | `third_result` 是 SDK 给的语义资源，还是仅关键词？完整的 NLU/DM 链路在哪里实现？        |
+| 8  | **错误码全集**                | 文档只给了 `error` 字段，没有错误码表。量产问题定位离不开它                            |
+| 9  | **`otaInfo` 的作用**        | Builder 里有这个字段但全文未解释                                          |
+| 10 | **端内外模式的性能差异**           | 车内 4 音区线性 AEC vs 车外 3 音区模型波束 —— 两套前端策略的实测差异你有数据吗？             |
 
 > 补全这 10 条，你就拥有了**一份百度语音车规方案在公开渠道不存在的完整能力地图**。
 
@@ -221,20 +247,20 @@ Android 侧只跑解码器 `tiny_easr`。**请确认：**
 
 ## 表 B · 语音合成 SDK
 
-> ⚠️ **注意：合成不在本次接口文档范围内，说明是另一套 SDK。** 下表基于公开版 `tts_1.0.3` 6.4.0。
+> ⚠️ **注意：合成不在本次接口文档范围内，说明是另一套 SDK。** 下表基于公开版 `tts_1.0.3` 6.4.0。  
 > **待你确认项目实际用的是哪一套**——这一列空着本身就是重要信息。
 
-| # | 能力项 | 公开版说明（待核实是否与你项目一致） | 你项目实际用法 | 行为差异 | 踩过的坑 |
-|---|---|---|---|---|---|
-| 1 | 在线合成 | 无需音库，直接调用 | | | |
-| 2 | 离线合成 | 需 SN 序列号，首次联网自动下载授权文件；授权文件会过期，`MIX`/`OFFLINE` 模式均依赖它 | | | |
-| 3 | 激活 / 鉴权方式 | 三选一：离线（SN）/ iamKey / accessToken；2.1 起 AKSK 不再使用 | | | |
-| 4 | 音库资源 | 内置 4 个基础音库，支持 16 个发音人；精品音库需额外下载；6.2.7 及之前版本音库不兼容当前 SDK | | | |
-| 5 | 播放策略 | 边下载边播放（区别于 REST API 一次性下载整段） | | | |
-| 6 | 包名绑定 | `applicationId` 必须与控制台应用完全一致（离线功能必需） | | | |
-| 7 | 错误码 | -102 / -109 为鉴权相关（AppId、包名、SN 三者需一致） | | | |
-| 8 | 系统要求 | Android 8.0+ | | | |
-| 9 | **与识别 SDK 的关系** | **两套独立 SDK：不同版本节奏、不同鉴权、不同失败模式** | | | |
+| # | 能力项             | 公开版说明（待核实是否与你项目一致）                                     | 你项目实际用法 | 行为差异 | 踩过的坑 |
+| - | --------------- | ------------------------------------------------------ | ------- | ---- | ---- |
+| 1 | 在线合成            | 无需音库，直接调用                                              |         |      |      |
+| 2 | 离线合成            | 需 SN 序列号，首次联网自动下载授权文件；授权文件会过期，`MIX`/`OFFLINE` 模式均依赖它   |         |      |      |
+| 3 | 激活 / 鉴权方式       | 三选一：离线（SN）/ iamKey / accessToken；2.1 起 AKSK 不再使用       |         |      |      |
+| 4 | 音库资源            | 内置 4 个基础音库，支持 16 个发音人；精品音库需额外下载；6.2.7 及之前版本音库不兼容当前 SDK |         |      |      |
+| 5 | 播放策略            | 边下载边播放（区别于 REST API 一次性下载整段）                           |         |      |      |
+| 6 | 包名绑定            | `applicationId` 必须与控制台应用完全一致（离线功能必需）                   |         |      |      |
+| 7 | 错误码             | -102 / -109 为鉴权相关（AppId、包名、SN 三者需一致）                   |         |      |      |
+| 8 | 系统要求            | Android 8.0+                                           |         |      |      |
+| 9 | **与识别 SDK 的关系** | **两套独立 SDK：不同版本节奏、不同鉴权、不同失败模式**                        |         |      |      |
 
 ---
 
@@ -242,37 +268,37 @@ Android 侧只跑解码器 `tiny_easr`。**请确认：**
 
 ### 从接口文档直接读出的高风险点（先记上，你项目里真实踩到的优先）
 
-| # | 现象 | 根因 | 解法 | 你遇到过？ |
-|---|---|---|---|---|
-| 1 | 切换车内/车外模式后唤醒/识别无回调 | `resetSDK` 前未等 `wp.exit` / `asr.exit` | 严格按"退唤醒→退识别→resetSDK→重新 init→开唤醒"顺序 | |
-| 2 | 切换单/多实例后行为异常 | `setPlayMode` 前未停止全部识别 | 先停识别再切模式 | |
-| 3 | 车外模式多实例不工作 | **车外仅支持单实例** | 车外强制单实例 | |
-| 4 | 场景化指令词不触发 | 与唤醒词共用 `WP_WORDS`，可能被覆盖或顺序问题 | 单独校验 `WP_WORDS` 数组内容 | |
-| 5 | 声纹判定失败率高 | 阈值未实车标定（文档：可不设置，按实车调） | 建立标定流程，逐人/逐性别定阈值 | |
-| 6 | **临时热词静默失效** | 场景 ID 格式与 `HOTWORDS_UPDATE_CATEGORY` 不匹配 | 校验 JSON 格式与 category 严格对应 | |
-| 7 | 并行模式下状态机错乱 | 离线/在线各产生一次 `ASR_FINISH` | 按 `engineType` 区分处理，不能假设一次 | |
-| 8 | 偶现识别不返回 / 事件丢失 | **回调中做了阻塞或耗时操作** | 回调只做转发，耗时逻辑抛到独立线程 | |
-| 9 | 打断后无三方结果（符合预期） | `exitASR` 会丢弃结果 | 需要结果就别用 exitASR，用 `stopASR` | |
-| 10 | 线上问题无法定位 | 端侧日志未开启上云（需 PM 开云端开关） | 量产前确认云端开关状态 | |
+| #  | 现象                 | 根因                                       | 解法                                  | 你遇到过？ |
+| -- | ------------------ | ---------------------------------------- | ----------------------------------- | ----- |
+| 1  | 切换车内/车外模式后唤醒/识别无回调 | `resetSDK` 前未等 `wp.exit` / `asr.exit`    | 严格按"退唤醒→退识别→resetSDK→重新 init→开唤醒"顺序 |       |
+| 2  | 切换单/多实例后行为异常       | `setPlayMode` 前未停止全部识别                   | 先停识别再切模式                            |       |
+| 3  | 车外模式多实例不工作         | **车外仅支持单实例**                             | 车外强制单实例                             |       |
+| 4  | 场景化指令词不触发          | 与唤醒词共用 `WP_WORDS`，可能被覆盖或顺序问题             | 单独校验 `WP_WORDS` 数组内容                |       |
+| 5  | 声纹判定失败率高           | 阈值未实车标定（文档：可不设置，按实车调）                    | 建立标定流程，逐人/逐性别定阈值                    |       |
+| 6  | **临时热词静默失效**       | 场景 ID 格式与 `HOTWORDS_UPDATE_CATEGORY` 不匹配 | 校验 JSON 格式与 category 严格对应           |       |
+| 7  | 并行模式下状态机错乱         | 离线/在线各产生一次 `ASR_FINISH`                  | 按 `engineType` 区分处理，不能假设一次          |       |
+| 8  | 偶现识别不返回 / 事件丢失     | **回调中做了阻塞或耗时操作**                         | 回调只做转发，耗时逻辑抛到独立线程                   |       |
+| 9  | 打断后无三方结果（符合预期）     | `exitASR` 会丢弃结果                          | 需要结果就别用 exitASR，用 `stopASR`         |       |
+| 10 | 线上问题无法定位           | 端侧日志未开启上云（需 PM 开云端开关）                    | 量产前确认云端开关状态                         |       |
 
 ### 你自己项目里的坑（至少补 5 条）
 
-> 优先记**业务层**的坑——端点参数导致说话慢的用户被截断、连续对话时 VAD 状态机残留、
+> 优先记**业务层**的坑——端点参数导致说话慢的用户被截断、连续对话时 VAD 状态机残留、  
 > 播报打断时回声参考延迟导致误判……这类坑算法同事看不见，只有交付方知道，极其值钱。
 
 | # | 现象 | 根因 | 解法 | 影响面 | 是否可公开 |
-|---|---|---|---|---|---|
-| 1 | | | | | |
-| 2 | | | | | |
-| 3 | | | | | |
-| 4 | | | | | |
-| 5 | | | | | |
+| - | -- | -- | -- | --- | ----- |
+| 1 |    |    |    |     |       |
+| 2 |    |    |    |     |       |
+| 3 |    |    |    |     |       |
+| 4 |    |    |    |     |       |
+| 5 |    |    |    |     |       |
 
 ---
 
 ## 附二 · 这份清单的三个下游用途
 
-1. **面试答卷** —— "你用的方案能力边界在哪"，这是 95% 候选人只会说"用了 XX SDK"的问题。
+1. **面试答卷** —— "你用的方案能力边界在哪"，这是 95% 候选人只会说"用了 XX SDK"的问题。  
    **你的版本能讲到多实例、离在线并行、定向识别、声纹、免唤醒、hotPatch——这是公开文档查不到的层级。**
 2. **A 栈基线** —— M1/M2 的对照组数据从哪来、从哪开始优化。打点锚点见 `docs/评测方案.md` §M1。
 3. **内部技术依据** —— B 栈（端到端）迁移评估的起点，帮你推动业务，也帮你攒新项目的署名。
