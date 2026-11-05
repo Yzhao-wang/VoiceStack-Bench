@@ -40,12 +40,16 @@
 
 ### 由此得出的四个判断
 
-1. **NPU 部署才是你的主战场，不是 ABI。**
-   降噪在 NPU 上 → Android 侧 native 只有解码器 → **ABI 兼容性问题基本不存在**（32 位也跑得动）。
-   真正值得深挖的是：**哪个 NPU？模型怎么转换部署？量化方案？算子有没有回退？功耗与温升怎么控？**
-   —— 这恰好就是 24 周路线图阶段 3 的「端侧部署」，**而你每天都在做**。
-   学习重点应从"怎么部署"转向"**怎么横向对比、怎么量化评测、怎么在不同 SoC 之间做选型**"，
-   这才是从执行者变成决策者的那一步。
+1. **NPU 部署才是你的主战场，不是 ABI。**  
+   降噪在 NPU 上 → Android 侧 native 只有解码器 → **ABI 兼容性问题基本不存在**（32 位也跑得动）。  
+   **你的实际能力边界要划清楚**：高通 HTP（8295 / 8155）+ QNN 工具链 + 模型**集成与问题定位**——  
+   模型是百度给的，但"怎么把百度模型在两代高通座舱芯片上跑通、出问题怎么定位"这套活是你干的。  
+   **这已经是稀缺能力**（同一语音方案要同时跑在 8155 / 8295 两代座舱芯片上，跨代际适配本身就是门槛）。  
+   **但它属于"集成层"，不属于"模型层"。**  
+   **要补的短板因此非常明确**：模型转换、量化方案、算子支持度评估、性能调优这四件事。  
+   补上它们，你就能从"集成者"变成"能独立完成端侧部署与选型的人"——  
+   这正是 24 周路线图阶段 3 的目标，也正是「三栈对比台」C 栈存在的意义（自己把全流程走一遍）。  
+   补不上，你就永远只能讲"百度提供了什么"，讲不了"我判断过什么"。
 2. **`IPcmAudioRecord` 是你项目自己的实现，这是整条链路上工程量最大、也最能体现个人能力的地方。** 音频格式、通道数、参考信号回灌时机都在你手里。"哪一段是你自己设计的"——答案就在这里。
 3. **这份文档只覆盖 ASR + 唤醒 + 热词，没有 TTS。** 说明合成走的是另一套 SDK（表 B 单独记）。**两套 SDK 的版本节奏、失败模式、鉴权方式都不一样，是两个独立的故障域**——这是常被忽略的架构事实。
 4. **能力比公开版强得多**：多实例、车内/车外双模式、免唤醒、oneshot、声纹唤醒、场景化指令词、离在线并行识别、定向识别。这些在公开文档里查不到，只能靠你手上的接口文档讲出来。
@@ -57,7 +61,7 @@
 | #    | 能力项     | 接口 / 关键参数                                                                                                                                       | 文档规定的边界与约束                                                                                  | 你项目实际用法                             | 风险与坑 |
 | ---- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- | ----------------------------------- | ---- |
 | A1-1 | SDK 初始化 | `initSDK(Context, SDKConfig)`<br />Builder: `solution` `algorithm` `audioRecord` `audioZoneNum` `logLevel` `hotPatch` `otaInfo` `evetnListener` | `audioRecord` 必传（`IPcmAudioRecord` 自定义实现）；初始化前须完成 AudioRecord 与 PCM 格式对齐                    | AudioRecord要注意缓存音频数据，以及和技术部音频数据传输链路 |      |
-| A1-2 | 硬件方案    | `SPEECH_SOLUTION`<br />`SOLUTION_WITH_BAIDU_DSP`<br />`SOLUTION_BAIDU_SOFT_AEC`<br />`SOLUTION_THIRD_PARTY_AEC`                                 | 三选一。DSP 方案前端在硬件侧；软消噪与三方消噪在 Android 侧。**方案切换需重新 initSDK**                                    |                                     |      |
+| A1-2 | 硬件方案    | `SPEECH_SOLUTION`<br />`SOLUTION_WITH_BAIDU_DSP`<br />`SOLUTION_BAIDU_SOFT_AEC`<br />`SOLUTION_THIRD_PARTY_AEC`                                 | 三选一。DSP 方案前端在硬件侧；软消噪与三方消噪在 Android 侧。**方案切换需重新 initSDK**                                    | **SOLUTION_WITH_BAIDU_DSP**；降噪模型跑在**高通 HTP**（8295 / 8155 座舱芯片自带 NPU），**模型由百度提供，你们负责集成到硬件、适配与问题定位** | 跨代际 SoC 适配；HTP 算子兼容与性能回归；同一方案要同时跑在两代座舱芯片上 |
 | A1-3 | 算法类型    | `SPEECH_ALGORITHM`<br />`ALGORITHM_LINE_AEC`（线性 AEC）<br />`ALGORITHM_MODEL_BEAM`（模型波束）<br />`ALGORITHM_BEAM_FEATURE`（模型特征）                      | 与 `solution` 正交组合。车内用线性 AEC，车外用模型波束——**说明两套场景的前端策略不同**                                      |                                     |      |
 | A1-4 | 音区数量    | `audioZoneNum`                                                                                                                                  | 车内 4 音区 / 车外 3 音区。**音区数影响波束与定向能力**                                                          |                                     |      |
 | A1-5 | 单/多实例   | `setPlayMode(Context, playMode)`<br />`playMode`: 0 单实例 / 1 多实例                                                                                 | **切换模式前必须先停掉前面所有识别**；**车外模式仅支持单实例识别**                                                       |                                     |      |
@@ -104,6 +108,7 @@
 | A3-10 | 在线必传参数    | `PID` + `APP_KEY` + `URL` + `CUID`                                                                              | PID 由 PM 申请；`URL` 为在线识别服务域名（示例 `https://audiotest.baidu.com/v2`）  |         |      |
 | A3-11 | 离线必传参数    | `OFFLINE_PID` + `OFFLINE_APP_KEY` + `ASR_OFFLINE_ENGINE_LICENSE_FILE_PATH` + `ASR_OFFLINE_ENGINE_DAT_FILE_PATH` | **加载引擎时会校验 License**；License 可放 `assets:///bds_license.dat` 或绝对路径 |         |      |
 | A3-12 | 用户透传      | `decoder-server.pam`                                                                                            | 自定义字段随请求上行，可用于埋点/场景标识                                             |         |      |
+
 
 > **A3-8 与 A3-9 的区别是打断策略的核心。** `exitASR` = 立刻丢弃（用于用户真正想打断）；`stopASR` = 闭嘴但保留结果（用于误触发回滚、或者"我想让系统别再听了但已说的话别丢"）。**能讲清这个区别，说明你理解打断的真实语义，而不是只会调接口。**
 
@@ -182,29 +187,39 @@
 **已确认**：① 是定制版 SDK 包体；② **降噪算法跑在 NPU 上**。  
 **待确认**：③ 定制版提供哪些 ABI、arm64 是否原生支持；④ NPU 归属与模型部署责任方。
 
-> **ABI 术语（填表前先看这段）**：ABI = Application Binary Interface，决定一段**已编译的机器码**能在哪种 CPU 架构上运行。
-> Android 上具体表现为"这个 `.so` 能在什么 CPU 上跑"：同一 SDK 为不同架构各编一份，打包进 APK 时按目录区分
-> `lib/armeabi-v7a/`（ARM 32 位）、`lib/arm64-v8a/`（ARM 64 位）、`lib/x86_64/`（模拟器）。
-> 车机 SoC（高通 8295 / RK3588 等）通常是 arm64-v8a。多数 64 位 CPU 可向下运行 32 位 .so（AArch32 兼容），
+> **ABI 术语（填表前先看这段）**：ABI = Application Binary Interface，决定一段**已编译的机器码**能在哪种 CPU 架构上运行。  
+> Android 上具体表现为"这个 `.so` 能在什么 CPU 上跑"：同一 SDK 为不同架构各编一份，打包进 APK 时按目录区分  
+> `lib/armeabi-v7a/`（ARM 32 位）、`lib/arm64-v8a/`（ARM 64 位）、`lib/x86_64/`（模拟器）。  
+> 车机 SoC（高通 8295 / RK3588 等）通常是 arm64-v8a。多数 64 位 CPU 可向下运行 32 位 .so（AArch32 兼容），  
 > 但性能打折、包体翻倍，且**纯 64 位进程无法加载 32 位库**。
 >
-> **但对你们这不是问题**：降噪在 NPU 上 → Android 侧 native 只有解码器 → 32 位也跑得动，ABI 影响极小。
-> **所以重点应从"ABI 是什么"转向"架构边界在哪"：**
-> ① Android 侧还跑哪些 native 库？（只有解码器？唤醒模型呢？）
-> ② **VAD 端点判定在 NPU 侧还是 Android 侧？**（决定端点参数在哪配，关联「附一 · 空白清单」第 3 条）
-> ③ 唤醒模型的推理跑在哪
-> ④ **NPU 是哪种？**（高通 HTP / RK3588 NPU / 地平线 BPU / 百度自家 DSP）
+> **但对你们这不是问题**：降噪在 NPU 上 → Android 侧 native 只有解码器 → 32 位也跑得动，ABI 影响极小。  
+> **所以重点应从"ABI 是什么"转向"架构边界在哪"：**  
+> ① Android 侧还跑哪些 native 库？（只有解码器？唤醒模型呢？）  
+> ② **VAD 端点判定在 NPU 侧还是 Android 侧？**（决定端点参数在哪配，关联「附一 · 空白清单」第 3 条）  
+> ③ 唤醒模型的推理跑在哪  
+> ④ **NPU 是哪种？**（高通 HTP / RK3588 NPU / 地平线 BPU / 百度自家 DSP）  
 > ⑤ **NPU 模型的转换、量化、部署是你们做的，还是百度提供的？**（这一条决定它算不算你的能力标签）
 >
 > **排查命令**
+>
 > ```bash
-> unzip -l 你的sdk.aar | grep '\.so$'                        # SDK 带了哪些 ABI
-> unzip -l app-release.apk | grep 'lib/'                    # 最终进了哪些
-> adb shell getprop ro.product.cpu.abilist                  # 设备支持哪些
-> adb shell cat /proc/<pid>/maps | grep '\.so'              # 实际加载了哪些（最准）
+> ```
+
+|   |   |
+| - | - |
+
+> unzip -l 你的sdk.aar | grep '.so$'                        # SDK 带了哪些 ABI  
+> unzip -l app-release.apk | grep 'lib/'                    # 最终进了哪些  
+> adb shell getprop ro.product.cpu.abilist                  # 设备支持哪些  
+> |  |  |  
+> | --- | --- |  
+> adb shell cat /proc/<pid>/maps | grep '.so'              # 实际加载了哪些（最准）
+>
 > ```
 >
 > 答：是定制版 SDK 包体，降噪跑在 NPU 上。
+> ```
 
 **Q2 · 网络策略 —— 答案变了**  
 公开版是"联网强制走在线"；**这套定制版支持 `DECODER`=4 离在线并行**。  
@@ -218,7 +233,7 @@
 **请确认：这套定制版是否仍有时间戳校验？License 校验是否与时间相关？**  
 若车机无 GPS/NTP，License 过期或时间漂移时会发生什么？
 
-> 答：
+> 答：有**License，过期后模型不可用**
 
 ---
 
